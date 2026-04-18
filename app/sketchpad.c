@@ -22,6 +22,10 @@ void print_pixel(struct pixel *in) {
   printf("Pixel %p: (%d, %d, %d)\n", &in, in->r, in->g, in->b);
 }
 
+bool pixel_eq(struct pixel *a, struct pixel *b) {
+  return ((a->r == b->r) && (a->g == b->g) && (a->b == b->b));
+}
+
 bool init_img_buffer(struct img_buffer *img, unsigned int height,
                      unsigned int width) {
   img->data = malloc(height * width * sizeof(struct pixel));
@@ -93,30 +97,44 @@ bool read_buf(struct img_buffer *img_in, struct pixel *out, unsigned int x,
   return true;
 }
 
-int main() {
-  // create buffer on the stack
-  struct img_buffer my_buf = {0};
-  // print_img_buffer(&my_buf);
-  // printf("init result: %d\n", init_img_buffer(&my_buf, 100, 100));
-  // print_img_buffer(&my_buf);
-  // free_img_buffer(&my_buf);
-  // print_img_buffer(&my_buf);
-
+void test_pixel() {
+  struct img_buffer img = {0};
   struct pixel my_pixel = (struct pixel){
       .r = 123,
       .g = 100,
       .b = 50,
   };
   struct pixel read_pixel = {0};
+
   print_pixel(&my_pixel);
   print_pixel(&read_pixel);
 
-  printf("init result: %d\n", init_img_buffer(&my_buf, 100, 100));
-  write_to_buf(&my_buf, &my_pixel, 0, 0);
-  read_buf(&my_buf, &read_pixel, 0, 0);
+  if (!init_img_buffer(&img, 100, 100))
+    goto cleanup;
+
+  if (!write_to_buf(&img, &my_pixel, 0, 0))
+    goto cleanup;
+
+  if (!read_buf(&img, &read_pixel, 0, 0))
+    goto cleanup;
+
   print_pixel(&my_pixel);
   print_pixel(&read_pixel);
+
+  if (!pixel_eq(&my_pixel, &read_pixel))
+    goto cleanup;
+
+  return;
+
+cleanup:
+  printf("test_pixel() failed!");
+  free_img_buffer(&img);
+}
+
+int main() {
+  // create buffer on the stack
+  struct img_buffer my_buf = {0};
+  test_pixel();
   free_img_buffer(&my_buf);
-
   return 0;
 }
