@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,9 +11,9 @@ struct img_buffer {
 };
 
 struct pixel {
-  char r;
-  char g;
-  char b;
+  unsigned char r;
+  unsigned char g;
+  unsigned char b;
 };
 
 void print_pixel(struct pixel *in) {
@@ -131,10 +132,52 @@ cleanup:
   free_img_buffer(&img);
 }
 
+bool write_ppm(const char *path, struct img_buffer *img) {
+  char int_buffer[60] = {0};
+  FILE *fp = fopen(path, "w");
+  if (!fp || !img || !img->data) {
+    return false;
+  }
+
+  /* PPM format has a 'maxval' field of 255. */
+  fputs("P6\n", fp);
+  sprintf(int_buffer, "%u %u\n", img->width, img->height);
+  fputs(int_buffer, fp);
+  fputs("255\n", fp);
+
+  for (int h = 0; h < img->height; h++) {
+    for (int w = 0; w < img->width; w++) {
+      char pixel_buf[100] = {0};
+      struct pixel pxl = (struct pixel){0};
+      read_buf(img, &pxl, w, h);
+      sprintf(pixel_buf, "%u %u %u", pxl.r, pxl.g, pxl.b);
+      fputs(pixel_buf, fp);
+    }
+    fputs("\n", fp);
+  }
+  fclose(fp);
+  return true;
+}
+
 int main() {
   // create buffer on the stack
   struct img_buffer my_buf = {0};
-  test_pixel();
+  unsigned int limit = 100;
+  init_img_buffer(&my_buf, limit, limit);
+
+  for (int h = 0; h < my_buf.height; h++) {
+    for (int w = 0; w < my_buf.width; w++) {
+      struct pixel pxl = (struct pixel){
+          .r = (char)h + w,
+          .g = (char)h + w,
+          .b = (char)h + w,
+      };
+      write_to_buf(&my_buf, &pxl, w, h);
+    }
+  }
+
+  write_ppm("../out.ppm", &my_buf);
+  // test_pixel();
   free_img_buffer(&my_buf);
   return 0;
 }
