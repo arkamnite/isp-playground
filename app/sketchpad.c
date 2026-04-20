@@ -1,3 +1,4 @@
+#include <_types/_uint16_t.h>
 #include <ctype.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -255,13 +256,10 @@ bool read_pgm(const char *path, struct image *img) {
     unsigned int index;
     int parsed_char;
     struct pixel_raw_t pixel = {0};
-    // fread(v, sizeof(char), 2, fp);
-    // value = v[0];
-    // value = (value << 8) | v[1];
 
     fread(&value, sizeof(uint16_t), 1, fp);
     pixel.v = value;
-    printf("%u\n", value);
+    printf("%04x\t%d\n", value, value);
     memcpy((struct pixel_raw_t *)img->data + px, &pixel,
            sizeof(struct pixel_raw_t));
   }
@@ -276,7 +274,7 @@ bool read_pgm(const char *path, struct image *img) {
  */
 bool write_ppm(const char *path, struct image *img) {
   char int_buffer[60] = {0};
-  FILE *fp = fopen(path, "w");
+  FILE *fp = fopen(path, "wb");
   if (!fp || !img || !img->data) {
     return false;
   }
@@ -290,13 +288,13 @@ bool write_ppm(const char *path, struct image *img) {
 
   if (img->data_t == PIXEL_RAW_T) {
     for (int px = 0; px < img->height * img->width; px++) {
-      char pixel_buf[100] = {0};
       struct pixel_raw_t pxl = (struct pixel_raw_t){0};
       struct pixel_raw_t *data = img->data;
       memcpy(&pxl, (struct pixel_raw_t *)img->data + px,
              sizeof(struct pixel_raw_t));
-      sprintf(pixel_buf, "%u %u %u ", pxl.v, pxl.v, pxl.v);
-      fputs(pixel_buf, fp);
+      fwrite(&pxl.v, sizeof(uint16_t), 1, fp);
+      fwrite(&pxl.v, sizeof(uint16_t), 1, fp);
+      fwrite(&pxl.v, sizeof(uint16_t), 1, fp);
     }
   } else if (img->data_t == PIXEL_RGB_T) {
     for (int h = 0; h < img->height; h++) {
@@ -304,10 +302,10 @@ bool write_ppm(const char *path, struct image *img) {
         char pixel_buf[100] = {0};
         struct pixel_rgb_t pxl = (struct pixel_rgb_t){0};
         read_img_pixel_u16(img, &pxl, w, h);
-        sprintf(pixel_buf, "%u %u %u ", pxl.r, pxl.g, pxl.b);
-        fputs(pixel_buf, fp);
+        fwrite(&pxl.r, sizeof(uint16_t), 1, fp);
+        fwrite(&pxl.g, sizeof(uint16_t), 1, fp);
+        fwrite(&pxl.b, sizeof(uint16_t), 1, fp);
       }
-      fputs("\n", fp);
     }
   }
   fclose(fp);
@@ -351,11 +349,11 @@ void test_ppm_write() {
 
   export_image("../res/out.ppm", &my_buf);
 
-  // test_pixel();
   free_img_buffer(&my_buf);
 }
 
 int main() {
+  // test_ppm_write();
   struct image img = (struct image){0};
   read_pgm("../res/rpi_test.pgm", &img);
   write_ppm("../res/rpi_test.ppm", &img);
