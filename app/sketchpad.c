@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -5,36 +6,59 @@
 #include <string.h>
 
 enum pixel_t { PIXEL_U16 };
+enum image_data_t {
+  // Uninitialised data
+  NONE_DATA_T,
+  // PGM RAW Bayer Data
+  PIXEL_RAW_T,
+  // Standard RGB with 16-bit per channel.
+  PIXEL_RGB_T,
+};
 
 struct image {
   unsigned int height;
   unsigned int width;
   void *data;
-  enum pixel_t data_t;
+  enum image_data_t data_t; // TODO: Add plumbing for this.
 };
 
-struct pixel_u16 {
+struct pixel_raw_t {
+  uint16_t v;
+};
+
+struct pixel_rgb_t {
   uint16_t r;
   uint16_t g;
   uint16_t b;
 };
 
-void print_pixel(struct pixel_u16 *in) {
+void print_pixel(struct pixel_rgb_t *in) {
   if (in == NULL) {
     return;
   }
   printf("Pixel %p: (%u, %u, %u)\n", &in, in->r, in->g, in->b);
 }
 
-bool pixel_eq(struct pixel_u16 *a, struct pixel_u16 *b) {
+bool pixel_eq(struct pixel_rgb_t *a, struct pixel_rgb_t *b) {
   return ((a->r == b->r) && (a->g == b->g) && (a->b == b->b));
 }
 
-bool init_img_buffer(struct image *img, unsigned int height,
-                     unsigned int width) {
-  img->data = malloc(height * width * sizeof(struct pixel_u16));
+bool init_img_buffer(struct image *img, unsigned int height, unsigned int width,
+                     enum image_data_t data_t) {
+  switch (data_t) {
+  case PIXEL_RAW_T:
+    img->data = malloc(height * width * sizeof(struct pixel_raw_t));
+    break;
+  case PIXEL_RGB_T:
+    img->data = malloc(height * width * sizeof(struct pixel_rgb_t));
+    break;
+  default:
+    printf("Invalid IMAGE_DATA_T enum provided for img init");
+    return false;
+  }
 
   if (img->data) {
+    img->data_t = data_t;
     img->height = height;
     img->width = width;
   }
@@ -48,6 +72,7 @@ void free_img_buffer(struct image *img) {
   img->width = 0;
   free(img->data);
   img->data = NULL;
+  img->data_t = NONE_DATA_T;
 }
 
 void print_img_buffer(struct image *img) {
@@ -56,7 +81,7 @@ void print_img_buffer(struct image *img) {
   printf("Data Pointer: %p\n", img->data);
   if (img->data) {
     printf("Buffer size in pixels: %zd\n",
-           (img->height * img->width) / sizeof(struct pixel_u16));
+           (img->height * img->width) / sizeof(struct pixel_rgb_t));
   }
 }
 
@@ -77,43 +102,45 @@ unsigned int calculate_index(struct image *img, unsigned int x,
   return y * img->width + x;
 }
 
-bool write_img_pixel_u16(struct image *img_out, struct pixel_u16 *in,
+bool write_img_pixel_u16(struct image *img_out, struct pixel_rgb_t *in,
                          unsigned int x, unsigned int y) {
-  if (y >= img_out->height || x >= img_out->width) {
+  if (y >= img_out->height || x >= img_out->width ||
+      img_out->data_t != PIXEL_RGB_T) {
     return false;
   }
 
   unsigned int index = calculate_index(img_out, x, y);
-  struct pixel_u16 *pixels = (struct pixel_u16 *)img_out->data;
-  memcpy(pixels + index, in, sizeof(struct pixel_u16));
+  struct pixel_rgb_t *pixels = (struct pixel_rgb_t *)img_out->data;
+  memcpy((struct pixel_rgb_t *)pixels + index, in, sizeof(struct pixel_rgb_t));
   return true;
 }
 
-bool read_img_pixel_u16(struct image *img_in, struct pixel_u16 *out,
+bool read_img_pixel_u16(struct image *img_in, struct pixel_rgb_t *out,
                         unsigned int x, unsigned int y) {
-  if (y >= img_in->height || x >= img_in->width) {
+  if (y >= img_in->height || x >= img_in->width ||
+      img_in->data_t != PIXEL_RGB_T) {
     return false;
   }
 
   unsigned int index = calculate_index(img_in, x, y);
-  struct pixel_u16 *pixels = (struct pixel_u16 *)img_in->data;
-  memcpy(out, pixels + index, sizeof(struct pixel_u16));
+  struct pixel_rgb_t *pixels = (struct pixel_rgb_t *)img_in->data;
+  memcpy(out, (struct pixel_rgb_t *)pixels + index, sizeof(struct pixel_rgb_t));
   return true;
 }
 
 void test_pixel_u16() {
   struct image img = {0};
-  struct pixel_u16 my_pixel = (struct pixel_u16){
+  struct pixel_rgb_t my_pixel = (struct pixel_rgb_t){
       .r = 123,
       .g = 100,
       .b = 50,
   };
-  struct pixel_u16 read_pixel = {0};
+  struct pixel_rgb_t read_pixel = {0};
 
   print_pixel(&my_pixel);
   print_pixel(&read_pixel);
 
-  if (!init_img_buffer(&img, 100, 100))
+  if (!init_img_buffer(&img, 100, 100, PIXEL_RGB_T))
     goto cleanup;
 
   if (!write_img_pixel_u16(&img, &my_pixel, 0, 0))
@@ -135,6 +162,114 @@ cleanup:
   free_img_buffer(&img);
 }
 
+/* ChatGPT wrote this function. */
+void parse_ws(FILE *fp) {
+  int curr_char;
+  while ((curr_char = fgetc(fp)) != EOF) {
+    if (isspace(curr_char)) {
+      continue;
+    }
+
+    if (curr_char == '#') {
+      while ((curr_char = fgetc(fp)) != '\n')
+        ;
+      continue;
+    }
+
+    ungetc(curr_char, fp);
+    break;
+  }
+}
+
+/* I wrote this function. */
+unsigned short parse_pgm_int(FILE *fp) {
+  char buffer[10] = {0};
+  int curr_char;
+
+  while ((curr_char = fgetc(fp)) != EOF) {
+
+    if (isspace(curr_char)) {
+      break;
+    }
+
+    sprintf(buffer, "%s%c", buffer, (char)curr_char);
+  }
+
+  ungetc(curr_char, fp);
+  return (unsigned short)atoi(buffer);
+}
+
+/**
+ * Read a PGM containing the raw Bayer data into an image buffer.
+ */
+bool read_pgm(const char *path, struct image *img) {
+  char buffer[100] = {0};
+  int curr_char, parsed_value;
+  unsigned int height, width, maxvalue;
+  FILE *fp;
+
+  if (!img) {
+    return false;
+  }
+
+  // Clear out the image data
+  if (img->data) {
+    printf("Warning: overwriting existing data in image buffer.");
+  }
+
+  free_img_buffer(img);
+
+  fp = fopen(path, "rb");
+  if (!fp) {
+    printf("Couldn't open PGM file.");
+    return false;
+  }
+
+  fread(buffer, sizeof(char), 2, fp);
+  if (!strstr(buffer, "P5")) {
+    printf("PGM file is missing the 'P5' magic number.");
+    printf("%s\n", buffer);
+    return false;
+  }
+
+  memset(buffer, 0, sizeof(buffer));
+
+  parse_ws(fp);
+  width = parse_pgm_int(fp);
+  parse_ws(fp);
+  height = parse_pgm_int(fp);
+  parse_ws(fp);
+  maxvalue = parse_pgm_int(fp);
+  fgetc(fp);
+
+  if (!init_img_buffer(img, height, width, PIXEL_RAW_T)) {
+    printf("Error creating image buffer for RAW PGM file.");
+    return false;
+  }
+
+  printf("h: %u, w: %u, v: %u\n", height, width, maxvalue);
+
+  for (unsigned int px = 0; px < height * width; px++) {
+    uint16_t value;
+    uint8_t v[2];
+    unsigned int index;
+    int parsed_char;
+    struct pixel_raw_t pixel = {0};
+    // fread(v, sizeof(char), 2, fp);
+    // value = v[0];
+    // value = (value << 8) | v[1];
+
+    fread(&value, sizeof(uint16_t), 1, fp);
+    pixel.v = value;
+    printf("%u\n", value);
+    memcpy((struct pixel_raw_t *)img->data + px, &pixel,
+           sizeof(struct pixel_raw_t));
+  }
+
+  fclose(fp);
+  return true;
+}
+
 /**
  * TODO: We will have to make sure that the data format within the image buffer
  * is correct.
@@ -153,15 +288,27 @@ bool write_ppm(const char *path, struct image *img) {
   fputs(int_buffer, fp);
   fputs("65535\n", fp);
 
-  for (int h = 0; h < img->height; h++) {
-    for (int w = 0; w < img->width; w++) {
+  if (img->data_t == PIXEL_RAW_T) {
+    for (int px = 0; px < img->height * img->width; px++) {
       char pixel_buf[100] = {0};
-      struct pixel_u16 pxl = (struct pixel_u16){0};
-      read_img_pixel_u16(img, &pxl, w, h);
-      sprintf(pixel_buf, "%u %u %u", pxl.r, pxl.g, pxl.b);
+      struct pixel_raw_t pxl = (struct pixel_raw_t){0};
+      struct pixel_raw_t *data = img->data;
+      memcpy(&pxl, (struct pixel_raw_t *)img->data + px,
+             sizeof(struct pixel_raw_t));
+      sprintf(pixel_buf, "%u %u %u ", pxl.v, pxl.v, pxl.v);
       fputs(pixel_buf, fp);
     }
-    fputs("\n", fp);
+  } else if (img->data_t == PIXEL_RGB_T) {
+    for (int h = 0; h < img->height; h++) {
+      for (int w = 0; w < img->width; w++) {
+        char pixel_buf[100] = {0};
+        struct pixel_rgb_t pxl = (struct pixel_rgb_t){0};
+        read_img_pixel_u16(img, &pxl, w, h);
+        sprintf(pixel_buf, "%u %u %u ", pxl.r, pxl.g, pxl.b);
+        fputs(pixel_buf, fp);
+      }
+      fputs("\n", fp);
+    }
   }
   fclose(fp);
   return true;
@@ -172,14 +319,28 @@ bool write_ppm(const char *path, struct image *img) {
 // breadcrumbs to the RAW data.
 bool dng_to_bayer(const char *file, struct image *img) { return false; }
 
-int main() {
+bool export_image(const char *file, struct image *img) {
+  if (img) {
+    switch (img->data_t) {
+    case PIXEL_RGB_T:
+      return write_ppm(file, img);
+    default:
+      printf("Unsupported export option\n");
+      return false;
+    }
+  }
+
+  return false;
+}
+
+void test_ppm_write() {
   struct image my_buf = {0};
   unsigned int limit = 6552;
-  init_img_buffer(&my_buf, limit / 2, limit);
+  init_img_buffer(&my_buf, limit / 2, limit, PIXEL_RGB_T);
 
   for (int h = 0; h < my_buf.height; h++) {
     for (int w = 0; w < my_buf.width; w++) {
-      struct pixel_u16 pxl = (struct pixel_u16){
+      struct pixel_rgb_t pxl = (struct pixel_rgb_t){
           .r = (uint16_t)h + w,
           .g = (uint16_t)h + w,
           .b = (uint16_t)h + w,
@@ -188,9 +349,16 @@ int main() {
     }
   }
 
-  write_ppm("../res/out.ppm", &my_buf);
+  export_image("../res/out.ppm", &my_buf);
 
   // test_pixel();
   free_img_buffer(&my_buf);
+}
+
+int main() {
+  struct image img = (struct image){0};
+  read_pgm("../res/rpi_test.pgm", &img);
+  write_ppm("../res/rpi_test.ppm", &img);
+  free_img_buffer(&img);
   return 0;
 }
