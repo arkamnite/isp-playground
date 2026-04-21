@@ -530,7 +530,7 @@ bool reduce_f32_v3_cfa(struct pixel_f32_v3_t *pixel,
   pixel->g *= (float)cfa->g;
   pixel->b *= (float)cfa->b;
 
-  return false;
+  return true;
 }
 
 bool apply_wb(struct image *img, struct pixel_f32_v3_t *scales) {
@@ -586,135 +586,169 @@ bool apply_wb(struct image *img, struct pixel_f32_v3_t *scales) {
  *
  */
 
-bool calculate_x_y(unsigned int index, unsigned int height_in,
-                   unsigned int width_in, unsigned int *x_out,
-                   unsigned int *y_out) {
+bool calculate_x_y(unsigned int index, unsigned int width_in,
+                   unsigned int *x_out, unsigned int *y_out) {
   if (!x_out || !y_out) {
     return false;
   }
 
-  if (index >= height_in * width_in) {
-    return false;
-  }
-
   *x_out = index % width_in;
-  *y_out = index / height_in;
+  *y_out = index / width_in;
 
   return true;
 }
 
-/*
- * Intended to be used to safely accumulate the pixel found at
- * (offset_x,offset_y) with the one at index so that a running average can later
- * be calculated with the output parameters numerator_out and denominator_out.
- */
-bool accumulate_pixel(struct image *img, unsigned int index,
-                      unsigned int offset_x, unsigned int offset_y,
-                      float *numerator_out, float *denominator_out) {
-  unsigned int x, y, neighbour_index;
-
-  if (!img || !img->data || img->data_t != PIXEL_F32_T) {
-    return false;
-  }
-
-  if (!calculate_x_y(index, img->height, img->width, &x, &y)) {
-    return false;
-  }
-
-  // Find out if our offsets are within range
-  long neighbour_x = x + offset_x;
-  long neighbour_y = y + offset_y;
-  bool discard = (neighbour_x > img->width) || (neighbour_x < 0) ||
-                 (neighbour_x > img->height) || (neighbour_y < 0);
-  if (discard) {
-    return true;
-  } else {
-    struct pixel_f32_t *data = (struct pixel_f32_t *)img->data;
-    neighbour_index = calculate_index(img, neighbour_x, neighbour_y);
-    *numerator_out += data[index].v;
-    *denominator_out += 1;
-    return true;
-  }
+bool valid_coordinates(unsigned int width, unsigned int height, long x,
+                       long y) {
+  return (!(x < 0 || y < 0 || x >= width || y >= height));
 }
 
-bool calculate_debayer_pixel(struct image *img, unsigned int index,
-                             struct pixel_f32_v3_t *out) {
-  struct pixel_f32_t *pixels;
-  struct cfa_descriptor cfa = {0};
-  float sum1, sum2, count1, count2;
+void demosaic_cfa_r(struct image *img, long x, long y,
+                    struct pixel_f32_v3_t *out) {
+  struct pixel_f32_t *pixels = (struct pixel_f32_t *)img->data;
 
-  if (index >= img->height * img->width) {
-    printf("Index out of bounds for debayering");
-    return false;
+  int g_dirs[][2] = {
+      {-1, 0},
+      {1, 0},
+      {0, -1},
+      {0, 1},
+  };
+
+  int b_dirs[][2] = {
+      {-1, -1},
+      {1, 1},
+      {-1, -1},
+      {1, 1},
+  };
+
+  size_t g_count = sizeof(g_dirs) / sizeof(g_dirs[0]);
+  float g_sum = 0.0f;
+  int g_num = 0;
+  for (int g_i = 0; g_i < g_count; g_i++) {
+    long x_g = x + g_dirs[g_i][0];
+    long y_g = y + g_dirs[g_i][1];
+
+    if (valid_coordinates(img->width, img->height, x_g, y_g)) {
+      g_sum += pixels[calculate_index(img, x_g, y_g)].v;
+      g_num += 1;
+    }
   }
 
-  calculate_cfa_channel(img, index, &cfa);
-  pixels = (struct pixel_f32_t *)img->data;
+  size_t b_count = sizeof(b_dirs) / sizeof(b_dirs[0]);
+  float b_sum = 0.0f;
+  int b_num = 0;
+  for (int b_i = 0; b_i < g_count; b_i++) {
+    long x_b = x + g_dirs[b_i][0];
+    long y_b = y + g_dirs[b_i][1];
 
-  // We are going to need a reverse version of calculate_index which decomposes
-  // a single input index into x and y coordinates, and then another function to
-  // safely find a pixel offset to this in 1D.
+    if (valid_coordinates(img->width, img->height, x_b, y_b)) {
+      b_sum += pixels[calculate_index(img, x_b, y_b)].v;
+      b_num += 1;
+    }
+  }
 
-  if (cfa.r) {
-    out->r = pixels[index].v;
-    // How do we find the nearest Gs?
-    // One each in Up, Down, Left, Right
-    accumulate_pixel(img, index, 0, -1, &sum1, &count1);
-    accumulate_pixel(img, index, 0, 1, &sum1, &count1);
-    accumulate_pixel(img, index, -1, 0, &sum1, &count1);
-    accumulate_pixel(img, index, 1, 0, &sum1, &count1);
-    // How do we find the nearest Bs?
-    // One each in TR, TL, BR, BL (diagonals)
-    accumulate_pixel(img, index, -1, 1, &sum2, &count2);
-    accumulate_pixel(img, index, -1, -1, &sum2, &count2);
-    accumulate_pixel(img, index, 1, -1, &sum2, &count2);
-    accumulate_pixel(img, index, 1, 1, &sum2, &count2);
+  out->r = pixels[calculate_index(img, x, y)].v;
+  out->g = (g_sum / (float)g_num);
+  out->b = (b_sum / (float)b_num);
+}
 
-    out->g = (sum1 / count1);
-    out->b = (sum2 / count2);
-  } else if (cfa.g) {
-    out->g = pixels[index].v;
-    // Calculate R, B
-    // R: above and below if we have B besides us
-    unsigned int x, y;
-    calculate_x_y(index, img->height, img->width, &x, &y);
+void demosaic_cfa_g(struct image *img, long x, long y,
+                    struct pixel_f32_v3_t *out) {
+  struct pixel_f32_t *pixels = (struct pixel_f32_t *)img->data;
 
-    if (x % 2 == 0) {
-      // R on our right and left, B on our up and down
-      accumulate_pixel(img, index, 1, 0, &sum1, &count1);
-      accumulate_pixel(img, index, -1, 0, &sum1, &count1);
-      accumulate_pixel(img, index, 0, -1, &sum2, &count2);
-      accumulate_pixel(img, index, 0, 1, &sum2, &count2);
+  int even_dirs[][2] = {
+      {-1, 0},
+      {1, 0},
+  };
 
-    } else {
-      // R on our up and down, B on our right and left
-      accumulate_pixel(img, index, 0, -1, &sum1, &count1);
-      accumulate_pixel(img, index, 0, 1, &sum1, &count1);
-      accumulate_pixel(img, index, 1, 0, &sum2, &count2);
-      accumulate_pixel(img, index, -1, 0, &sum2, &count2);
+  int odd_dirs[][2] = {
+      {0, -1},
+      {0, 1},
+  };
+
+  size_t count = sizeof(even_dirs) / sizeof(even_dirs[0]);
+  float e_sum = 0.0f;
+  float o_sum = 0.0f;
+  int e_count = 0;
+  int o_count = 0;
+
+  for (int i = 0; i < count; i++) {
+    long x_e = x + even_dirs[i][0];
+    long y_e = y + even_dirs[i][1];
+
+    if (valid_coordinates(img->width, img->height, x_e, y_e)) {
+      e_sum += pixels[calculate_index(img, x_e, y_e)].v;
+      e_count += 1;
     }
 
-    out->r = (sum1 / count1);
-    out->b = (sum2 / count2);
-  } else if (cfa.b) {
-    out->b = pixels[index].v;
-    // calculate R, G
-    // G is always up, down, left or right
-    accumulate_pixel(img, index, 0, -1, &sum1, &count1);
-    accumulate_pixel(img, index, 0, 1, &sum1, &count1);
-    accumulate_pixel(img, index, -1, 0, &sum1, &count1);
-    accumulate_pixel(img, index, 1, 0, &sum1, &count1);
-    // R is always on diagonals
-    accumulate_pixel(img, index, -1, 1, &sum2, &count2);
-    accumulate_pixel(img, index, -1, -1, &sum2, &count2);
-    accumulate_pixel(img, index, 1, -1, &sum2, &count2);
-    accumulate_pixel(img, index, 1, 1, &sum2, &count2);
+    long x_o = x + odd_dirs[i][0];
+    long y_o = y + odd_dirs[i][1];
 
-    out->g = (sum1 / count1);
-    out->r = (sum2 / count2);
+    if (valid_coordinates(img->width, img->height, x_o, y_o)) {
+      o_sum += pixels[calculate_index(img, x_o, y_o)].v;
+      o_count += 1;
+    }
   }
 
-  return true;
+  if (x % 2 == 0) {
+    // R is odd_dirs, B is even_dirs
+    out->r = o_sum / (float)o_count;
+    out->g = e_sum / (float)e_count;
+  } else {
+    // B is odd_dirs, R is even_dirs
+    out->r = e_sum / (float)e_count;
+    out->g = o_sum / (float)o_count;
+  }
+  out->b = pixels[calculate_index(img, x, y)].v;
+}
+
+void demosaic_cfa_b(struct image *img, long x, long y,
+                    struct pixel_f32_v3_t *out) {
+  struct pixel_f32_t *pixels = (struct pixel_f32_t *)img->data;
+
+  int g_dirs[][2] = {
+      {-1, 0},
+      {1, 0},
+      {0, -1},
+      {0, 1},
+  };
+
+  int r_dirs[][2] = {
+      {-1, -1},
+      {1, 1},
+      {-1, -1},
+      {1, 1},
+  };
+
+  size_t g_count = sizeof(g_dirs) / sizeof(g_dirs[0]);
+  float g_sum = 0.0f;
+  int g_num = 0;
+  for (int g_i = 0; g_i < g_count; g_i++) {
+    long x_g = x + g_dirs[g_i][0];
+    long y_g = y + g_dirs[g_i][1];
+
+    if (valid_coordinates(img->width, img->height, x_g, y_g)) {
+      g_sum += pixels[calculate_index(img, x_g, y_g)].v;
+      g_num += 1;
+    }
+  }
+
+  size_t r_count = sizeof(r_dirs) / sizeof(r_dirs[0]);
+  float r_sum = 0.0f;
+  int r_num = 0;
+  for (int r_i = 0; r_i < g_count; r_i++) {
+    long x_r = x + g_dirs[r_i][0];
+    long y_r = y + g_dirs[r_i][1];
+
+    if (valid_coordinates(img->width, img->height, x_r, y_r)) {
+      r_sum += pixels[calculate_index(img, x_r, y_r)].v;
+      r_num += 1;
+    }
+  }
+
+  out->r = (r_sum / (float)r_num);
+  out->g = (g_sum / (float)g_num);
+  out->b = pixels[calculate_index(img, x, y)].v;
 }
 
 // Bilinear Interpolation
@@ -746,7 +780,14 @@ bool apply_debayering_bi(struct image *img) {
 
   for (unsigned int i = 0; i < img->height * img->width; i++) {
     // calculate which channel we need to use
+    unsigned int i_x = 0;
+    unsigned int i_y = 0;
+
     struct pixel_f32_v3_t *rgb_pixel = &rgb_f_pixels[i];
+    struct cfa_descriptor cfa;
+
+    calculate_x_y(i, img->width, &i_x, &i_y);
+    calculate_cfa_channel(img, i, &cfa);
 
     /*
      * Each pixel will currently contain the data for a specific channel.
@@ -758,9 +799,13 @@ bool apply_debayering_bi(struct image *img) {
      * perform some 1D arithmetic to work out where the next pixel is going to
      * be.
      */
-    if (!calculate_debayer_pixel(img, i, rgb_pixel)) {
-      printf("Error calculating debayer pixel.");
-      return false;
+
+    if (cfa.r) {
+      demosaic_cfa_r(img, (long)i_x, (long)i_y, rgb_pixel);
+    } else if (cfa.g) {
+      demosaic_cfa_g(img, (long)i_x, (long)i_y, rgb_pixel);
+    } else if (cfa.b) {
+      demosaic_cfa_b(img, (long)i_x, (long)i_y, rgb_pixel);
     }
 
     printf("Debayer: %f -> %f, %f, %f\n", norm_pixels[i].v, rgb_pixel->r,
@@ -772,6 +817,7 @@ bool apply_debayering_bi(struct image *img) {
   free(img->data);
   img->data = malloc(rgb_f_pixels_size);
   memcpy(img->data, rgb_f_pixels, rgb_f_pixels_size);
+  free(rgb_f_pixels);
   img->data_t = PIXEL_F32_V3_T;
 
   return true;
