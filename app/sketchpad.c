@@ -338,6 +338,21 @@ bool write_ppm(const char *path, struct image *img) {
         fwrite(&pxl.b, sizeof(uint16_t), 1, fp);
       }
     }
+  } else if (img->data_t == PIXEL_F32_V3_T) {
+    // We will have to de-normalise the data here back to the PPM range.
+    for (int px = 0; px < img->height * img->width; px++) {
+      struct pixel_f32_v3_t *data = img->data;
+      struct pixel_f32_v3_t pxl = (struct pixel_f32_v3_t){0};
+      memcpy(&pxl, (struct pixel_f32_v3_t *)img->data + px,
+             sizeof(struct pixel_f32_v3_t));
+      unsigned int r = pxl.r * (65535 - 4096) + 4096;
+      unsigned int g = pxl.g * (65535 - 4096) + 4096;
+      unsigned int b = pxl.b * (65535 - 4096) + 4096;
+      fwrite(&r, sizeof(uint16_t), 1, fp);
+      fwrite(&g, sizeof(uint16_t), 1, fp);
+      fwrite(&b, sizeof(uint16_t), 1, fp);
+    }
+
   } else {
     printf("Unsupported data type for image buffer!");
     fclose(fp);
