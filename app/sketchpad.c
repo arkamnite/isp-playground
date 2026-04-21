@@ -364,7 +364,14 @@ void test_ppm_write() {
 }
 
 /* ================================================= */
-/* Passes */
+/*
+ * Passes
+ * 1. Linearlisation & Normalisation
+ * 2. White Balancing
+ * 3. Demosaicing / De-Bayering
+ * 4. Colour Space Correction
+ * 5. Brightness and Contrast Control
+ */
 /* ================================================= */
 
 /*
@@ -419,6 +426,72 @@ bool apply_normalisation(struct image *img, uint16_t b, uint16_t w) {
   free(raw_data);
   return true;
 }
+
+/*
+ * CFA channel calculator - this isn't a pass, but is needed for working out
+ * which channel we are in based on 1D data. We could use bitfields here, but
+ * I haven't personally seen that much in the wild.
+ */
+struct cfa_descriptor {
+  bool r;
+  bool g;
+  bool b;
+};
+
+// For now, assume the BGGR (hehe) pattern used by the RPi camera.
+bool calculate_cfa_channel(struct image *img, unsigned int index,
+                           struct cfa_descriptor *cfa_desc) {
+  if (index >= img->height * img->width) {
+    return false;
+  }
+
+  if (img->data_t == PIXEL_F32_T || img->data_t == PIXEL_RAW_T) {
+    /* 1D data types */
+    /*
+     *      0  1  2  3  4  5  6  7  8  9 ...
+     *
+     * 0    B  G  B  G  B  G  B  G  B  G ...
+     * 1    G  R  G  R  G  R  G  R  G  R ...
+     * 2    B  G  B  G  B  G  B  G  B  G ...
+     * 3    G  R  G  R  G  R  G  R  G  R ...
+     *
+     * So... my initial attempt at this:
+     *
+     * The beginning of the [G, R] pattern depends on the width of the image. Or
+     * rather, we can ask ourselves "which pattern are we in?" based on i mod w
+     * (the non-remainder part).
+     *
+     * Then, we use odd/even-ness of the remainder of i mod w to work out which
+     * index of said pattern we need to use.
+     *
+     * I overcomplicated this the first time round and got caught up in the
+     * img->width not being 0-indexed. Turns out you can just ignore that.
+     *
+     */
+    unsigned int row = index / img->width;
+    unsigned int column = index % img->width;
+    bool row_even = row % 2 == 0;
+    bool column_even = column % 2 == 0;
+
+    cfa_desc->r = (!row_even && !column_even);
+    cfa_desc->g = (row_even ^ column_even);
+    cfa_desc->b = (row_even && column_even);
+
+    return true;
+  }
+  printf("Can't calculate CFA channel for this data type!");
+  return false;
+}
+
+/*
+ * White Balance
+ *
+ * The next step is to calculate the white balance needed to properly light the
+ * image to make it look more like the light we see in the real world. This
+ * requires us to rescale the RGB values based on a pixel that we know is
+ * 'white' in the real world.
+ *
+ */
 
 /**
  * RPi Camera Data:
