@@ -202,6 +202,10 @@ unsigned short parse_pgm_int(FILE *fp) {
 
 /**
  * Read a PGM containing the raw Bayer data into an image buffer.
+ *
+ * Important information for RPi Camera from dcraw:
+ * Scaling with darkness 4096, saturation 65535, and
+ * multipliers 1.018250 1.000000 2.160646 1.000000
  */
 bool read_pgm(const char *path, struct image *img) {
   char buffer[100] = {0};
@@ -259,7 +263,6 @@ bool read_pgm(const char *path, struct image *img) {
 
     fread(&value, sizeof(uint16_t), 1, fp);
     pixel.v = value;
-    printf("%04x\t%d\n", value, value);
     memcpy((struct pixel_raw_t *)img->data + px, &pixel,
            sizeof(struct pixel_raw_t));
   }
@@ -311,11 +314,6 @@ bool write_ppm(const char *path, struct image *img) {
   fclose(fp);
   return true;
 }
-
-// TODO: extract Bayer RAW from DNG image.
-// Need to iterate over headers, find the right SubIFDs, and then follow the
-// breadcrumbs to the RAW data.
-bool dng_to_bayer(const char *file, struct image *img) { return false; }
 
 bool export_image(const char *file, struct image *img) {
   if (img) {
