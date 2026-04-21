@@ -12,6 +12,7 @@
  */
 #define PASS_NORM_DEBUG_STR "DEBUG_PASS_NORM"
 #define PASS_WB_DEBUG_STR "DEBUG_PASS_WB"
+#define PASS_DEBAYER_DEBUG_STR "DEBUG_PASS_DEBAYER"
 
 enum pixel_t { PIXEL_U16 };
 enum image_data_t {
@@ -569,6 +570,213 @@ bool apply_wb(struct image *img, struct pixel_f32_v3_t *scales) {
   return true;
 }
 
+/*
+ * Debayering
+ *
+ * The debayering pass will finally transform the normalised 32-bit float data
+ * into three channels per pixel. The example BGGR CFA from above is copied
+ * here:
+ *
+ *      0  1  2  3  4  5  6  7  8  9 ...
+ *
+ * 0    B  G  B  G  B  G  B  G  B  G ...
+ * 1    G  R  G  R  G  R  G  R  G  R ...
+ * 2    B  G  B  G  B  G  B  G  B  G ...
+ * 3    G  R  G  R  G  R  G  R  G  R ...
+ *
+ */
+
+bool calculate_x_y(unsigned int index, unsigned int height_in,
+                   unsigned int width_in, unsigned int *x_out,
+                   unsigned int *y_out) {
+  if (!x_out || !y_out) {
+    return false;
+  }
+
+  if (index >= height_in * width_in) {
+    return false;
+  }
+
+  *x_out = index % width_in;
+  *y_out = index / height_in;
+
+  return true;
+}
+
+/*
+ * Intended to be used to safely accumulate the pixel found at
+ * (offset_x,offset_y) with the one at index so that a running average can later
+ * be calculated with the output parameters numerator_out and denominator_out.
+ */
+bool accumulate_pixel(struct image *img, unsigned int index,
+                      unsigned int offset_x, unsigned int offset_y,
+                      float *numerator_out, float *denominator_out) {
+  unsigned int x, y, neighbour_index;
+
+  if (!img || !img->data || img->data_t != PIXEL_F32_T) {
+    return false;
+  }
+
+  if (!calculate_x_y(index, img->height, img->width, &x, &y)) {
+    return false;
+  }
+
+  // Find out if our offsets are within range
+  long neighbour_x = x + offset_x;
+  long neighbour_y = y + offset_y;
+  bool discard = (neighbour_x > img->width) || (neighbour_x < 0) ||
+                 (neighbour_x > img->height) || (neighbour_y < 0);
+  if (discard) {
+    return true;
+  } else {
+    struct pixel_f32_t *data = (struct pixel_f32_t *)img->data;
+    neighbour_index = calculate_index(img, neighbour_x, neighbour_y);
+    *numerator_out += data[index].v;
+    *denominator_out += 1;
+    return true;
+  }
+}
+
+bool calculate_debayer_pixel(struct image *img, unsigned int index,
+                             struct pixel_f32_v3_t *out) {
+  struct pixel_f32_t *pixels;
+  struct cfa_descriptor cfa = {0};
+  float sum1, sum2, count1, count2;
+
+  if (index >= img->height * img->width) {
+    printf("Index out of bounds for debayering");
+    return false;
+  }
+
+  calculate_cfa_channel(img, index, &cfa);
+  pixels = (struct pixel_f32_t *)img->data;
+
+  // We are going to need a reverse version of calculate_index which decomposes
+  // a single input index into x and y coordinates, and then another function to
+  // safely find a pixel offset to this in 1D.
+
+  if (cfa.r) {
+    out->r = pixels[index].v;
+    // How do we find the nearest Gs?
+    // One each in Up, Down, Left, Right
+    accumulate_pixel(img, index, 0, -1, &sum1, &count1);
+    accumulate_pixel(img, index, 0, 1, &sum1, &count1);
+    accumulate_pixel(img, index, -1, 0, &sum1, &count1);
+    accumulate_pixel(img, index, 1, 0, &sum1, &count1);
+    // How do we find the nearest Bs?
+    // One each in TR, TL, BR, BL (diagonals)
+    accumulate_pixel(img, index, -1, 1, &sum2, &count2);
+    accumulate_pixel(img, index, -1, -1, &sum2, &count2);
+    accumulate_pixel(img, index, 1, -1, &sum2, &count2);
+    accumulate_pixel(img, index, 1, 1, &sum2, &count2);
+
+    out->g = (sum1 / count1);
+    out->b = (sum2 / count2);
+  } else if (cfa.g) {
+    out->g = pixels[index].v;
+    // Calculate R, B
+    // R: above and below if we have B besides us
+    unsigned int x, y;
+    calculate_x_y(index, img->height, img->width, &x, &y);
+
+    if (x % 2 == 0) {
+      // R on our right and left, B on our up and down
+      accumulate_pixel(img, index, 1, 0, &sum1, &count1);
+      accumulate_pixel(img, index, -1, 0, &sum1, &count1);
+      accumulate_pixel(img, index, 0, -1, &sum2, &count2);
+      accumulate_pixel(img, index, 0, 1, &sum2, &count2);
+
+    } else {
+      // R on our up and down, B on our right and left
+      accumulate_pixel(img, index, 0, -1, &sum1, &count1);
+      accumulate_pixel(img, index, 0, 1, &sum1, &count1);
+      accumulate_pixel(img, index, 1, 0, &sum2, &count2);
+      accumulate_pixel(img, index, -1, 0, &sum2, &count2);
+    }
+
+    out->r = (sum1 / count1);
+    out->b = (sum2 / count2);
+  } else if (cfa.b) {
+    out->b = pixels[index].v;
+    // calculate R, G
+    // G is always up, down, left or right
+    accumulate_pixel(img, index, 0, -1, &sum1, &count1);
+    accumulate_pixel(img, index, 0, 1, &sum1, &count1);
+    accumulate_pixel(img, index, -1, 0, &sum1, &count1);
+    accumulate_pixel(img, index, 1, 0, &sum1, &count1);
+    // R is always on diagonals
+    accumulate_pixel(img, index, -1, 1, &sum2, &count2);
+    accumulate_pixel(img, index, -1, -1, &sum2, &count2);
+    accumulate_pixel(img, index, 1, -1, &sum2, &count2);
+    accumulate_pixel(img, index, 1, 1, &sum2, &count2);
+
+    out->g = (sum1 / count1);
+    out->r = (sum2 / count2);
+  }
+
+  return true;
+}
+
+// Bilinear Interpolation
+bool apply_debayering_bi(struct image *img) {
+  struct pixel_f32_v3_t *rgb_f_pixels;
+  size_t rgb_f_pixels_size;
+  struct pixel_f32_t *norm_pixels;
+  unsigned int img_size;
+  bool debug_print;
+
+  if (!img) {
+    return false;
+  }
+
+  if (img->data_t != PIXEL_F32_T) {
+    return false;
+  }
+
+  img_size = img->height * img->width;
+  norm_pixels = (struct pixel_f32_t *)img->data;
+  rgb_f_pixels = malloc(img_size * sizeof(struct pixel_f32_v3_t));
+  rgb_f_pixels_size = img->height * img->width * sizeof(struct pixel_f32_v3_t);
+  debug_print = getenv(PASS_DEBAYER_DEBUG_STR) != NULL;
+
+  if (!rgb_f_pixels) {
+    printf("Error allocating space for RGB_F pixels!");
+    return false;
+  }
+
+  for (unsigned int i = 0; i < img->height * img->width; i++) {
+    // calculate which channel we need to use
+    struct pixel_f32_v3_t *rgb_pixel = &rgb_f_pixels[i];
+
+    /*
+     * Each pixel will currently contain the data for a specific channel.
+     * Once we know what channel this pixel corresponds to, we will need to
+     * calculate the average of the nearest pixels which aren't of this channel.
+     *
+     * We can probably leverage our existing calculate_cfa_channel to write a
+     * new function which will invert the values of cfa. Then, we need to
+     * perform some 1D arithmetic to work out where the next pixel is going to
+     * be.
+     */
+    if (!calculate_debayer_pixel(img, i, rgb_pixel)) {
+      printf("Error calculating debayer pixel.");
+      return false;
+    }
+
+    printf("Debayer: %f -> %f, %f, %f\n", norm_pixels[i].v, rgb_pixel->r,
+           rgb_pixel->g, rgb_pixel->b);
+  }
+
+  // now we need to re-init our image buffer with the right
+  // data.
+  free(img->data);
+  img->data = malloc(rgb_f_pixels_size);
+  memcpy(img->data, rgb_f_pixels, rgb_f_pixels_size);
+  img->data_t = PIXEL_F32_V3_T;
+
+  return true;
+}
+
 /**
  * RPi Camera Data:
  * Scaling with darkness 4096, saturation 65535, and
@@ -586,6 +794,7 @@ int main() {
   read_pgm("../res/rpi_test.pgm", &img);
   apply_normalisation(&img, 4096, 65535);
   apply_wb(&img, &wb_scales);
+  apply_debayering_bi(&img);
   write_ppm("../res/rpi_test.ppm", &img);
   free_img_buffer(&img);
   return 0;
