@@ -6,14 +6,23 @@
 #include <stdlib.h>
 #include <string.h>
 
+/**
+ * Set these environment variables to any value in order to
+ * enable debug logs for that pass.
+ */
+#define PASS_NORM_DEBUG_STR "DEBUG_PASS_NORM"
+#define PASS_WB_DEBUG_STR "DEBUG_PASS_WB"
+
 enum pixel_t { PIXEL_U16 };
 enum image_data_t {
   // Uninitialised data
   NONE_DATA_T,
   // PGM RAW Bayer Data
   PIXEL_RAW_T,
-  // Normalised pixel data, using 32-bit floats.
+  // Normalised pixel data, using a single 32-bit float.
   PIXEL_F32_T,
+  // Pixel data using 3 channels of 32-bit float data each.
+  PIXEL_F32_V3_T,
   // Standard RGB with 16-bit per channel.
   PIXEL_RGB_T,
 };
@@ -39,6 +48,12 @@ struct pixel_f32_t {
   float v;
 };
 
+struct pixel_f32_v3_t {
+  float r;
+  float g;
+  float b;
+};
+
 void print_pixel(struct pixel_rgb_t *in) {
   if (in == NULL) {
     return;
@@ -52,16 +67,19 @@ bool pixel_eq(struct pixel_rgb_t *a, struct pixel_rgb_t *b) {
 
 bool init_img_buffer(struct image *img, unsigned int height, unsigned int width,
                      enum image_data_t data_t) {
+  size_t size = height * width;
   switch (data_t) {
   case PIXEL_RAW_T:
-    img->data = malloc(height * width * sizeof(struct pixel_raw_t));
+    img->data = malloc(size * sizeof(struct pixel_raw_t));
     break;
   case PIXEL_F32_T:
-    img->data = malloc(height * width * sizeof(struct pixel_f32_t));
+    img->data = malloc(size * sizeof(struct pixel_f32_t));
     break;
   case PIXEL_RGB_T:
-    img->data = malloc(height * width * sizeof(struct pixel_rgb_t));
+    img->data = malloc(size * sizeof(struct pixel_rgb_t));
     break;
+  case PIXEL_F32_V3_T:
+    img->data = malloc(size * sizeof(struct pixel_f32_v3_t));
   default:
     printf("Invalid IMAGE_DATA_T enum provided for img init");
     return false;
@@ -398,6 +416,9 @@ bool apply_normalisation(struct image *img, uint16_t b, uint16_t w) {
     return false;
   }
 
+  // Find out if we are printing debugs
+  bool print_debugs = getenv(PASS_NORM_DEBUG_STR) != NULL;
+
   // Copy the image data buffer to here first
   size_t raw_data_size = img->height * img->width * sizeof(struct pixel_raw_t);
   struct pixel_raw_t *raw_data = malloc(raw_data_size);
@@ -420,7 +441,9 @@ bool apply_normalisation(struct image *img, uint16_t b, uint16_t w) {
     norm_value *= (1.0f / (float)(w - b));
     normalised_data[i].v = norm_value;
 
-    printf("Normalised %u -> %f\n", raw_data[i].v, norm_value);
+    if (print_debugs) {
+      printf("Normalised %u -> %f\n", raw_data[i].v, norm_value);
+    }
   }
 
   free(raw_data);
@@ -486,12 +509,65 @@ bool calculate_cfa_channel(struct image *img, unsigned int index,
 /*
  * White Balance
  *
- * The next step is to calculate the white balance needed to properly light the
- * image to make it look more like the light we see in the real world. This
- * requires us to rescale the RGB values based on a pixel that we know is
- * 'white' in the real world.
+ * The next step is to calculate the white balance needed to properly light
+ * the image to make it look more like the light we see in the real world.
+ * This requires us to rescale the RGB values based on a pixel that we know
+ * is 'white' in the real world.
+ *
+ * For this function, we use a struct pixel_f32_v3_t variable just to encode the
+ * scales for each channel, not because it transforms the data type within the
+ * image.
  *
  */
+bool reduce_f32_v3_cfa(struct pixel_f32_v3_t *pixel,
+                       struct cfa_descriptor *cfa) {
+  if (!pixel || !cfa) {
+    return false;
+  }
+
+  pixel->r *= (float)cfa->r;
+  pixel->g *= (float)cfa->g;
+  pixel->b *= (float)cfa->b;
+
+  return false;
+}
+
+bool apply_wb(struct image *img, struct pixel_f32_v3_t *scales) {
+  if (!img || !scales) {
+    return false;
+  }
+
+  if (img->data_t != PIXEL_F32_T) {
+    return false;
+  }
+
+  bool print_debugs = getenv(PASS_WB_DEBUG_STR) != NULL;
+
+  for (unsigned int i = 0; i < img->height * img->width; i++) {
+    // calculate which channel we need to use
+    struct cfa_descriptor cfa = {0};
+    struct pixel_f32_t *pixels = (struct pixel_f32_t *)img->data;
+    float old_value = pixels[i].v;
+    calculate_cfa_channel(img, i, &cfa);
+
+    // There is possibly a more efficient way of handling this.
+    if (cfa.r) {
+      pixels[i].v *= scales->r;
+    } else if (cfa.g) {
+      // This usually doesn't change anything since G is used as the base point,
+      // but adding this anyways just in case.
+      pixels[i].v *= scales->g;
+    } else if (cfa.b) {
+      pixels[i].v *= scales->b;
+    }
+
+    if (print_debugs) {
+      printf("Applied WB: %f -> %f\n", old_value, pixels[i].v);
+    }
+  }
+
+  return true;
+}
 
 /**
  * RPi Camera Data:
@@ -501,8 +577,15 @@ bool calculate_cfa_channel(struct image *img, unsigned int index,
 int main() {
   // test_ppm_write();
   struct image img = (struct image){0};
+  struct pixel_f32_v3_t wb_scales = (struct pixel_f32_v3_t){
+      .r = 1.01825f,
+      .g = 1.0f,
+      .b = 2.160646f,
+  };
+
   read_pgm("../res/rpi_test.pgm", &img);
   apply_normalisation(&img, 4096, 65535);
+  apply_wb(&img, &wb_scales);
   write_ppm("../res/rpi_test.ppm", &img);
   free_img_buffer(&img);
   return 0;
