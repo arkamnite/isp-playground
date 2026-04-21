@@ -12,6 +12,8 @@ enum image_data_t {
   NONE_DATA_T,
   // PGM RAW Bayer Data
   PIXEL_RAW_T,
+  // Normalised pixel data, using 32-bit floats.
+  PIXEL_F32_T,
   // Standard RGB with 16-bit per channel.
   PIXEL_RGB_T,
 };
@@ -33,6 +35,10 @@ struct pixel_rgb_t {
   uint16_t b;
 };
 
+struct pixel_f32_t {
+  float v;
+};
+
 void print_pixel(struct pixel_rgb_t *in) {
   if (in == NULL) {
     return;
@@ -49,6 +55,9 @@ bool init_img_buffer(struct image *img, unsigned int height, unsigned int width,
   switch (data_t) {
   case PIXEL_RAW_T:
     img->data = malloc(height * width * sizeof(struct pixel_raw_t));
+    break;
+  case PIXEL_F32_T:
+    img->data = malloc(height * width * sizeof(struct pixel_f32_t));
     break;
   case PIXEL_RGB_T:
     img->data = malloc(height * width * sizeof(struct pixel_rgb_t));
@@ -310,6 +319,10 @@ bool write_ppm(const char *path, struct image *img) {
         fwrite(&pxl.b, sizeof(uint16_t), 1, fp);
       }
     }
+  } else {
+    printf("Unsupported data type for image buffer!");
+    fclose(fp);
+    return false;
   }
   fclose(fp);
   return true;
@@ -350,10 +363,73 @@ void test_ppm_write() {
   free_img_buffer(&my_buf);
 }
 
+/* ================================================= */
+/* Passes */
+/* ================================================= */
+
+/*
+ * Linearisation & Normalisation
+ *
+ * Whilst we assume that dcraw has linearised our image
+ * for us, the RAW image may require normalising if there
+ * is any offset and scaling to the values. We need to apply
+ * an affine transformation based on some of the values given
+ * to us by dcraw when generating the RAW Bayer image.
+ *
+ * In this example, we need to normalise from [Black,White] to [0,1]
+ * in order to normalise these pixels. This is an involved routine
+ * which requires us to change from using integers to using floats,
+ * otherwise we're going to have some pretty useless data...
+ */
+bool apply_normalisation(struct image *img, uint16_t b, uint16_t w) {
+  if (img->data_t != PIXEL_RAW_T) {
+    return false;
+  }
+
+  if (w <= b) {
+    printf("Invalid B/W arguments provided for normalisation!");
+    return false;
+  }
+
+  // Copy the image data buffer to here first
+  size_t raw_data_size = img->height * img->width * sizeof(struct pixel_raw_t);
+  struct pixel_raw_t *raw_data = malloc(raw_data_size);
+  struct pixel_f32_t *normalised_data;
+  memcpy(raw_data, (struct pixel_raw_t *)img->data, raw_data_size);
+  free(img->data);
+  if (!init_img_buffer(img, img->height, img->width, PIXEL_F32_T)) {
+    return false;
+  }
+
+  normalised_data = img->data;
+  printf("Normalising data from [%u,%u]\n", b, w);
+  for (unsigned int i = 0; i < img->height * img->width; i++) {
+    uint16_t raw_value;
+    float norm_value;
+
+    raw_value = raw_data[i].v;
+    raw_value -= b;
+    norm_value = (float)raw_value;
+    norm_value *= (1.0f / (float)(w - b));
+    normalised_data[i].v = norm_value;
+
+    printf("Normalised %u -> %f\n", raw_data[i].v, norm_value);
+  }
+
+  free(raw_data);
+  return true;
+}
+
+/**
+ * RPi Camera Data:
+ * Scaling with darkness 4096, saturation 65535, and
+ * multipliers 1.018250 1.000000 2.160646 1.00000
+ */
 int main() {
   // test_ppm_write();
   struct image img = (struct image){0};
   read_pgm("../res/rpi_test.pgm", &img);
+  apply_normalisation(&img, 4096, 65535);
   write_ppm("../res/rpi_test.ppm", &img);
   free_img_buffer(&img);
   return 0;
